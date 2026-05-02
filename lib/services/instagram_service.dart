@@ -40,6 +40,9 @@ class InstagramService {
   /// The result exceeds 2^53 so a `BigInt` is used throughout; the
   /// stringified form is what the `/api/v1/` endpoint expects.
   static String shortcodeToMediaId(String shortcode) {
+    if (shortcode.isEmpty) {
+      throw const InstagramExtractionException('Shortcode cannot be empty.');
+    }
     var n = BigInt.zero;
     final base = BigInt.from(64);
     for (final rune in shortcode.runes) {
