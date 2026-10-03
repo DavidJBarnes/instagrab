@@ -1,13 +1,15 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'chrome_cookies.dart';
 import 'instagram_cookies.dart';
 
 /// Extracts image URLs from Instagram posts.
 ///
 /// Instagram no longer exposes any useful image information to
-/// unauthenticated clients (the post page is a JS-only shell, public
-/// APIs return 302/404/403). We authenticate by borrowing session
-/// cookies from the user's Firefox profile — see [FirefoxCookieJar].
+/// unauthenticated clients (the post page is a JS-only shell, the embed
+/// endpoint returns the same shell, public APIs return 302/404/403). We
+/// authenticate by borrowing session cookies from the user's browser — see
+/// [FirefoxCookieJar] and [ChromeCookieJar].
 ///
 /// Desktop-only (Linux). On Android the cookie source doesn't exist.
 class InstagramService {
@@ -27,9 +29,14 @@ class InstagramService {
   /// Extracts the shortcode from any IG share URL and returns the
   /// canonical `https://www.instagram.com/p/<shortcode>/` form, or null
   /// if the input isn't an IG post/reel/TV URL.
+  ///
+  /// Shortcodes are exactly 11 characters. Share links often append a
+  /// token built from the same alphabet (`/p/<shortcode><token>`), so the
+  /// match is length-bounded — a greedy capture swallows the token and
+  /// decodes to a media id that Instagram rejects with a 400.
   static String? normalizeUrl(String input) {
     final match = RegExp(
-      r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)',
+      r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]{11})',
     ).firstMatch(input.trim());
     if (match == null) return null;
     return 'https://www.instagram.com/p/${match.group(1)}/';
@@ -73,23 +80,26 @@ class InstagramService {
     final shortcode = RegExp(r'/p/([^/]+)/').firstMatch(canonical)!.group(1)!;
     final mediaId = shortcodeToMediaId(shortcode);
 
-    final cookieHeader = await FirefoxCookieJar.readInstagramCookieHeader();
-    if (cookieHeader == null) {
+    final sources = await _cookieSources();
+    if (sources.isEmpty) {
       throw const InstagramExtractionException(
-        'Not logged into Instagram in Firefox. Open Firefox, log into '
-        'instagram.com, then try again.',
+        'Not logged into Instagram in Firefox or Chrome. Log into '
+        'instagram.com in one of them, then try again.',
       );
     }
 
-    final response = await http.get(
-      Uri.parse('https://www.instagram.com/api/v1/media/$mediaId/info/'),
-      headers: {
-        'User-Agent': _userAgent,
-        'X-IG-App-ID': _appId,
-        'Cookie': cookieHeader,
-        'Accept': 'application/json',
-      },
-    ).timeout(const Duration(seconds: 20));
+    // One browser can hold a session Instagram no longer honours while
+    // another holds a good one, and nothing in the cookie jar tells them
+    // apart — only the API's answer does. Try each in turn and keep the first
+    // that works, the same "return if it worked, otherwise continue" shape
+    // the rest of this file uses.
+    final endpoint = 'https://www.instagram.com/api/v1/media/$mediaId/info/';
+    http.Response? attempt;
+    for (final source in sources) {
+      attempt = await _get(endpoint, source.header);
+      if (attempt.statusCode == 200) break;
+    }
+    final response = attempt!;
 
     if (response.statusCode == 401 || response.statusCode == 403) {
       throw const InstagramExtractionException(
@@ -97,10 +107,29 @@ class InstagramService {
         'in Firefox again, then retry.',
       );
     }
+    // An unauthorised API call is answered with a redirect rather than a 401
+    // — sometimes to the login page, sometimes back to the same URL. Neither
+    // is worth following, and the self-redirect is an infinite loop.
+    if (response.statusCode >= 300 && response.statusCode < 400) {
+      throw const InstagramExtractionException(
+        'Instagram would not authorise the request with any browser session '
+        'found. Open instagram.com in Firefox or Chrome, make sure you are '
+        'logged in and any identity-confirmation prompt is finished, then '
+        'retry.',
+      );
+    }
     if (response.statusCode == 404) {
       throw const InstagramExtractionException(
         'Post not found. It may be deleted or from a private account you '
         "don't follow.",
+      );
+    }
+    // A media id that is malformed or refers to something this account
+    // cannot see comes back as 400 with an explanation. It never succeeds on
+    // retry, so surface Instagram's own wording instead of suggesting one.
+    if (response.statusCode == 400) {
+      throw InstagramExtractionException(
+        'Instagram rejected the request: ${_messageFrom(response.body)}',
       );
     }
     if (response.statusCode != 200) {
@@ -124,6 +153,73 @@ class InstagramService {
       );
     }
     return urls;
+  }
+
+  /// Cookie headers from every browser that currently holds an Instagram
+  /// session. A browser that is absent contributes nothing; one that is
+  /// present but unreadable is reported only if no browser worked at all.
+  static Future<List<_CookieSource>> _cookieSources() async {
+    final sources = <_CookieSource>[];
+    final problems = <String>[];
+
+    try {
+      final chrome = await ChromeCookieJar.readInstagramCookieHeader();
+      if (chrome != null) sources.add(_CookieSource('Chrome', chrome));
+    } on ChromeCookieException catch (e) {
+      problems.add('Chrome: ${e.message}');
+    }
+
+    try {
+      final firefox = await FirefoxCookieJar.readInstagramCookieHeader();
+      if (firefox != null) sources.add(_CookieSource('Firefox', firefox));
+    } on CookieReadException catch (e) {
+      problems.add('Firefox: ${e.message}');
+    }
+
+    if (sources.isEmpty && problems.isNotEmpty) {
+      throw InstagramExtractionException(
+        'Could not read browser cookies. ${problems.join('; ')}',
+      );
+    }
+    return sources;
+  }
+
+  /// GETs [url] with the session cookies attached, leaving redirects
+  /// unfollowed — a 3xx carries meaning here, and following Instagram's
+  /// self-redirect just exhausts the client's redirect limit.
+  static Future<http.Response> _get(String url, String cookieHeader) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(url))
+        ..followRedirects = false
+        ..headers.addAll({
+          'User-Agent': _userAgent,
+          'X-IG-App-ID': _appId,
+          'Cookie': cookieHeader,
+          'Accept': 'application/json',
+        });
+      final streamed =
+          await client.send(request).timeout(const Duration(seconds: 20));
+      return await http.Response.fromStream(streamed);
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Pulls Instagram's own `message` field out of an error body, falling
+  /// back to the raw body when it isn't the JSON we expect.
+  static String _messageFrom(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final message = decoded['message'];
+        if (message is String && message.isNotEmpty) return message;
+      }
+    } on FormatException {
+      // Not JSON — fall through to the raw body.
+    }
+    final trimmed = body.trim();
+    return trimmed.isEmpty ? 'no details given' : trimmed;
   }
 
   /// Walks the media item and returns the highest-resolution image URL
@@ -165,6 +261,13 @@ class InstagramService {
     }
     return best?['url'] as String?;
   }
+}
+
+/// One browser's Instagram cookies, ready to send as a `Cookie:` header.
+class _CookieSource {
+  final String browser;
+  final String header;
+  const _CookieSource(this.browser, this.header);
 }
 
 /// Exception thrown when image extraction from Instagram fails.

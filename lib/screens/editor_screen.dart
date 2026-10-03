@@ -180,10 +180,10 @@ class _EditorScreenState extends State<EditorScreen> {
     final bytes = _activeBytes;
     final entry = _selected;
     if (bytes == null || entry == null) return;
-    if (_editedBytes == null) {
-      _toast('No edits to save');
-      return;
-    }
+    // An unedited image is still worth exporting — "grab it and keep the
+    // original" is a normal thing to want. Only the library write below is
+    // skipped in that case, since there is nothing new to store.
+    final hasEdits = _editedBytes != null;
     setState(() => _isSaving = true);
     try {
       final settings = await SettingsService.load();
@@ -203,22 +203,26 @@ class _EditorScreenState extends State<EditorScreen> {
       );
 
       // Update the library entry so the rail shows the edited version.
-      final libraryBytes = ImageService.encodeJpeg(decoded, quality: 95);
-      final updatedEntry = await LibraryService.update(
-        entry: entry,
-        bytes: libraryBytes,
-      );
-      final items = await LibraryService.list();
-      if (mounted) {
-        setState(() {
-          _library = items;
-          _selected = updatedEntry;
-          _originalBytes = libraryBytes;
-          _editedBytes = null;
-          _originalAspect = updatedEntry.width / updatedEntry.height;
-          _widthController.text = updatedEntry.width.toString();
-          _heightController.text = updatedEntry.height.toString();
-        });
+      // Skipped when nothing was edited: re-encoding an untouched original
+      // would only degrade the library copy.
+      if (hasEdits) {
+        final libraryBytes = ImageService.encodeJpeg(decoded, quality: 95);
+        final updatedEntry = await LibraryService.update(
+          entry: entry,
+          bytes: libraryBytes,
+        );
+        final items = await LibraryService.list();
+        if (mounted) {
+          setState(() {
+            _library = items;
+            _selected = updatedEntry;
+            _originalBytes = libraryBytes;
+            _editedBytes = null;
+            _originalAspect = updatedEntry.width / updatedEntry.height;
+            _widthController.text = updatedEntry.width.toString();
+            _heightController.text = updatedEntry.height.toString();
+          });
+        }
       }
 
       _toast('Saved → $path', duration: const Duration(seconds: 3));
@@ -363,7 +367,8 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
         ),
         Expanded(
-          child: _mode == _EditorMode.crop ? _buildCropView() : _buildResizeView(),
+          child:
+              _mode == _EditorMode.crop ? _buildCropView() : _buildResizeView(),
         ),
       ],
     );
@@ -543,7 +548,8 @@ class _EditorScreenState extends State<EditorScreen> {
                         _resizePresetChip('240×320', 240, 320),
                         _resizePresetChip('480×640 (Feature Phone)', 480, 640),
                         _resizePresetChip('600×800', 600, 800),
-                        _resizePresetChip('750×1000 (iPhone 6 to 8)', 750, 1000),
+                        _resizePresetChip(
+                            '750×1000 (iPhone 6 to 8)', 750, 1000),
                         _resizePresetChip('768×1024 (Old Android)', 768, 1024),
                         _resizePresetChip('960×1280', 960, 1280),
                       ],
@@ -732,8 +738,7 @@ class _InfoPaneState extends State<_InfoPane> {
     try {
       final uri = Uri.parse('${settings.wanlyApiUrl}/images/folders');
       final response = await http.get(uri, headers: {
-        if (settings.wanlyApiKey.isNotEmpty)
-          'X-API-Key': settings.wanlyApiKey,
+        if (settings.wanlyApiKey.isNotEmpty) 'X-API-Key': settings.wanlyApiKey,
       }).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as List<dynamic>;
@@ -770,7 +775,8 @@ class _InfoPaneState extends State<_InfoPane> {
         bytes,
         filename: '${widget.entry.shortcode}.jpg',
       ));
-      final streamed = await request.send().timeout(const Duration(seconds: 30));
+      final streamed =
+          await request.send().timeout(const Duration(seconds: 30));
       final response = await http.Response.fromStream(streamed);
       if (response.statusCode == 200) {
         if (mounted) {
@@ -852,7 +858,8 @@ class _InfoPaneState extends State<_InfoPane> {
           ),
           const SizedBox(height: 4),
           DropdownButton<String>(
-            value: _folderNames.contains(_selectedFolder) ? _selectedFolder : null,
+            value:
+                _folderNames.contains(_selectedFolder) ? _selectedFolder : null,
             isExpanded: true,
             hint: const Text('Select folder'),
             items: _folderNames.map((n) {
@@ -882,7 +889,8 @@ class _InfoPaneState extends State<_InfoPane> {
         children: [
           Text('Image info', style: theme.textTheme.titleMedium),
           const SizedBox(height: 12),
-          _row(context, 'Original', '${widget.entry.width} × ${widget.entry.height}'),
+          _row(context, 'Original',
+              '${widget.entry.width} × ${widget.entry.height}'),
           _row(
             context,
             'Current',

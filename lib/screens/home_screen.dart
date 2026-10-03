@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../services/instagram_service.dart';
 import '../services/image_service.dart';
 import '../services/library_service.dart';
+import '../services/settings_service.dart';
 import 'editor_screen.dart';
 import 'settings_screen.dart';
 
@@ -68,7 +69,9 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
+      final settings = await SettingsService.load();
       final added = <LibraryImage>[];
+      var exported = 0;
       for (var i = 0; i < imageUrls.length; i++) {
         setState(() {
           _status = 'Downloading image (${i + 1}/${imageUrls.length})...';
@@ -82,6 +85,24 @@ class _HomeScreenState extends State<HomeScreen> {
             carouselIndex: i,
           );
           added.add(entry);
+
+          // Also drop the untouched original into the user's save path, so a
+          // grab alone produces files where they expect them. Written
+          // verbatim (no decode/re-encode) to keep the CDN original intact —
+          // the export format setting applies to editor exports only.
+          try {
+            final ext = ImageService.extensionForBytes(bytes);
+            await ImageService.saveImage(
+              bytes,
+              filename: '${shortcode}_$i.$ext',
+              directory: settings.savePath,
+            );
+            exported++;
+          } catch (e) {
+            // A read-only or missing save path must not lose the grab —
+            // the library copy above is already safe on disk.
+            debugPrint('Failed to export image ${i + 1} to save path: $e');
+          }
         } catch (e) {
           // Skip failures on individual carousel frames
           debugPrint('Failed to grab image ${i + 1}: $e');
@@ -96,7 +117,13 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      setState(() => _loading = false);
+      setState(() {
+        _loading = false;
+        _error = exported == 0
+            ? 'Grabbed ${added.length} image(s) to the library, but could not '
+                'write to ${settings.savePath} — check the save path in Settings.'
+            : null;
+      });
 
       if (mounted) {
         await Navigator.of(context).push(
