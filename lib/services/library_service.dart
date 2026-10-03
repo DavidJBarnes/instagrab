@@ -3,11 +3,14 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
+import '../models/media_item.dart';
+import 'video_service.dart';
 
-/// One entry in the on-disk image library.
+/// One entry in the on-disk library — an image or a video.
 ///
-/// Represents an image we grabbed from Instagram, persisted to disk with
-/// enough metadata to show in the strip and info pane.
+/// Represents media we grabbed from Instagram, persisted to disk with
+/// enough metadata to show in the strip and info pane. The name predates
+/// video support; [kind] says which this is.
 class LibraryImage {
   /// Stable identifier used as the on-disk filename stem.
   final String id;
@@ -33,6 +36,17 @@ class LibraryImage {
   /// On-disk filename within the library directory.
   final String filename;
 
+  /// Image or video. Entries written before video support have no `kind`
+  /// in the index and load as images.
+  final MediaKind kind;
+
+  /// Cover-frame image within the library directory, for videos. Null for
+  /// images, and for videos whose cover could not be downloaded.
+  final String? thumbnailFilename;
+
+  /// Video length in seconds, when Instagram reported it.
+  final double? durationSeconds;
+
   const LibraryImage({
     required this.id,
     required this.sourceUrl,
@@ -43,7 +57,12 @@ class LibraryImage {
     required this.height,
     required this.fileSize,
     required this.filename,
+    this.kind = MediaKind.image,
+    this.thumbnailFilename,
+    this.durationSeconds,
   });
+
+  bool get isVideo => kind == MediaKind.video;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -55,6 +74,9 @@ class LibraryImage {
         'height': height,
         'fileSize': fileSize,
         'filename': filename,
+        'kind': kind.name,
+        if (thumbnailFilename != null) 'thumbnailFilename': thumbnailFilename,
+        if (durationSeconds != null) 'durationSeconds': durationSeconds,
       };
 
   factory LibraryImage.fromJson(Map<String, dynamic> j) => LibraryImage(
@@ -67,15 +89,22 @@ class LibraryImage {
         height: j['height'] as int,
         fileSize: j['fileSize'] as int,
         filename: j['filename'] as String,
+        kind: MediaKind.values.firstWhere(
+          (k) => k.name == j['kind'],
+          orElse: () => MediaKind.image,
+        ),
+        thumbnailFilename: j['thumbnailFilename'] as String?,
+        durationSeconds: (j['durationSeconds'] as num?)?.toDouble(),
       );
 }
 
-/// Persistent library of grabbed images.
+/// Persistent library of grabbed images and videos.
 ///
 /// Storage layout:
 ///   ~/.local/share/InstaGrab/library/
 ///     index.json              — list of [LibraryImage]
-///     <shortcode>_<i>.<ext>   — raw bytes for each entry
+///     <shortcode>_<i>.<ext>   — raw bytes for each entry (`.mp4` for videos)
+///     <shortcode>_<i>_thumb.jpg — cover frame for a video entry
 ///
 /// Edits to a library image are exported elsewhere (see settings save path);
 /// the library itself holds only originals and is never mutated after an
@@ -87,6 +116,30 @@ class LibraryService {
   }
 
   static File get _indexFile => File(p.join(_libraryDir.path, 'index.json'));
+
+  /// Absolute path of [filename] inside the library directory.
+  static String pathFor(String filename) => p.join(_libraryDir.path, filename);
+
+  /// The library's copy of [entry]'s media (the image, or the `.mp4`).
+  static File fileFor(LibraryImage entry) => File(pathFor(entry.filename));
+
+  /// [entry]'s cover-frame file, or null if it has none. Images are their
+  /// own thumbnail, so this returns the image file for them.
+  static File? thumbnailFileFor(LibraryImage entry) {
+    if (!entry.isVideo) return fileFor(entry);
+    final thumb = entry.thumbnailFilename;
+    return thumb == null ? null : File(pathFor(thumb));
+  }
+
+  /// Where the video for frame [carouselIndex] of [shortcode] lives in the
+  /// library. Download into this, then register it with [addVideo].
+  static Future<File> videoFileFor(String shortcode, int carouselIndex) async {
+    await _libraryDir.create(recursive: true);
+    return File(pathFor(_videoFilename(shortcode, carouselIndex)));
+  }
+
+  static String _videoFilename(String shortcode, int i) =>
+      VideoService.videoFilename(shortcode, i);
 
   /// Returns all library entries, newest-first.
   static Future<List<LibraryImage>> list() async {
@@ -132,6 +185,66 @@ class LibraryService {
 
     final existing = await list();
     final deduped = existing.where((e) => e.id != entry.id).toList();
+    // A frame that used to be a video leaves its .mp4 and cover behind.
+    for (final old in existing.where((e) => e.id == entry.id)) {
+      await _deleteFiles(old, keep: {filename});
+    }
+    deduped.insert(0, entry);
+    await _writeIndex(deduped);
+    return entry;
+  }
+
+  /// Registers an already-downloaded video (at [videoFileFor]) in the
+  /// library, storing [thumbnailBytes] as its cover when given. [width] and
+  /// [height] fall back to the cover's dimensions when Instagram didn't
+  /// report them.
+  static Future<LibraryImage> addVideo({
+    required String sourceUrl,
+    required String shortcode,
+    required int carouselIndex,
+    Uint8List? thumbnailBytes,
+    int? width,
+    int? height,
+    double? durationSeconds,
+  }) async {
+    await _libraryDir.create(recursive: true);
+    final filename = _videoFilename(shortcode, carouselIndex);
+    final video = File(pathFor(filename));
+    final fileSize = await video.length();
+
+    String? thumbName;
+    if (thumbnailBytes != null && thumbnailBytes.isNotEmpty) {
+      thumbName = '${shortcode}_${carouselIndex}_thumb.jpg';
+      await File(pathFor(thumbName)).writeAsBytes(thumbnailBytes);
+      if (width == null || height == null) {
+        final decoded = img.decodeImage(thumbnailBytes);
+        width ??= decoded?.width;
+        height ??= decoded?.height;
+      }
+    }
+
+    final entry = LibraryImage(
+      id: '${shortcode}_$carouselIndex',
+      sourceUrl: sourceUrl,
+      shortcode: shortcode,
+      carouselIndex: carouselIndex,
+      grabbedAt: DateTime.now(),
+      width: width ?? 0,
+      height: height ?? 0,
+      fileSize: fileSize,
+      filename: filename,
+      kind: MediaKind.video,
+      thumbnailFilename: thumbName,
+      durationSeconds: durationSeconds,
+    );
+
+    final existing = await list();
+    final deduped = existing.where((e) => e.id != entry.id).toList();
+    // Re-grabbing a post whose frame used to be an image (or vice versa)
+    // leaves the old file behind under a different extension.
+    for (final old in existing.where((e) => e.id == entry.id)) {
+      await _deleteFiles(old, keep: {filename, thumbName});
+    }
     deduped.insert(0, entry);
     await _writeIndex(deduped);
     return entry;
@@ -164,6 +277,9 @@ class LibraryService {
       height: decoded?.height ?? entry.height,
       fileSize: bytes.length,
       filename: entry.filename,
+      kind: entry.kind,
+      thumbnailFilename: entry.thumbnailFilename,
+      durationSeconds: entry.durationSeconds,
     );
 
     final items = await list();
@@ -172,13 +288,23 @@ class LibraryService {
     return updated;
   }
 
-  /// Removes an entry from the index and deletes its on-disk file.
+  /// Removes an entry from the index and deletes its on-disk files.
   static Future<void> delete(LibraryImage entry) async {
-    final file = File(p.join(_libraryDir.path, entry.filename));
-    if (await file.exists()) await file.delete();
+    await _deleteFiles(entry);
     final items = await list();
     items.removeWhere((e) => e.id == entry.id);
     await _writeIndex(items);
+  }
+
+  static Future<void> _deleteFiles(
+    LibraryImage entry, {
+    Set<String?> keep = const {},
+  }) async {
+    for (final name in [entry.filename, entry.thumbnailFilename]) {
+      if (name == null || keep.contains(name)) continue;
+      final file = File(pathFor(name));
+      if (await file.exists()) await file.delete();
+    }
   }
 
   static Future<void> _writeIndex(List<LibraryImage> items) async {

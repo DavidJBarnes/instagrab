@@ -35,28 +35,33 @@ Single-activity, two-screen Material 3 app. Flow:
 
 ```
 HomeScreen (URL input)
-  └─► InstagramService.extractImageUrls(url)     ← lib/services/instagram_service.dart
-        ├─ Strategy 1: GET post with mobile UA → parse og:image/twitter:image/JSON-LD
-        ├─ Strategy 2: GET with desktop UA (retry)
-        └─ Strategy 3: GET {url}embed/ → scan for cdninstagram.com/fbcdn.net URLs
-  └─► ImageService.downloadImage(url) per image  ← lib/services/image_service.dart
-  └─► EditorScreen(images: List<DownloadedImage>)
-        ├─ Crop mode:   crop_your_image Crop widget + aspect presets
-        └─ Resize mode: image pkg copyResize with optional aspect lock
-              └─► ImageService.saveImage → platform-specific output dir
+  └─► InstagramService.extractMedia(url) → List<MediaItem>   ← lib/services/instagram_service.dart
+        ├─ Strategy 1: logged-in /api/v1/media/<id>/info/ (browser cookies) → image_versions2 / video_versions
+        ├─ Strategy 2: public post page → embedded JSON, then og:video/og:image, then .mp4 CDN URLs
+        └─ Strategy 3: public {url}embed/captioned/ → parsed the same way
+  └─► per item: ImageService.downloadImage → LibraryService.add          (images)
+                VideoService.downloadVideo (streamed) → LibraryService.addVideo  (videos)
+      and a verbatim copy of each original into the save path
+  └─► EditorScreen(initialImageId)  — library rail (videos carry a play badge)
+        ├─ image: Crop mode (crop_your_image) / Resize mode (image pkg copyResize)
+        │     └─► ImageService.saveImage → save path
+        └─ video: cover-frame preview + Save video (VideoService.saveVideo, a file copy)
 ```
 
 Key invariants to preserve when editing:
 
-- **`InstagramService` is 100% static** (no instance state) and pure-Dart. All four strategies live in this one file and run sequentially — short-circuit on first non-empty result. When adding a strategy, chain it onto `extractImageUrls` in the same "return if non-empty, otherwise continue" pattern and throw `InstagramExtractionException` only after all strategies fail.
+- **`InstagramService` is 100% static** (no instance state) and pure-Dart. All strategies live in this one file and run sequentially — short-circuit on first non-empty result. When adding a strategy, chain it onto `extractMedia` in the same "return if non-empty, otherwise continue" pattern and throw `InstagramExtractionException` only after all strategies fail (the logged-in strategy's error is the one surfaced). The parsers `mediaFromApiItem` / `mediaFromHtml` are public and tested against `test/fixtures/`.
+- **Extraction returns `MediaItem`s** (`lib/models/media_item.dart`): image or video, with a cover `thumbnailUrl`, dimensions and duration for videos. For videos the highest-resolution entry of `video_versions` wins — those are progressive mp4s with audio muxed in; never use the DASH manifest or `bytestart=` segment URLs.
+- **Videos are never decoded or re-encoded.** `VideoService` streams them to `<name>.part`, checks the `ftyp` header, renames, and exports by file copy. No native video plugins — the editor shows the cover frame, and on Linux "Open in video player" just runs `xdg-open`.
+- **Library entries carry a `kind`** (`LibraryImage.kind`); index entries written before video support have none and load as images. A video entry's `filename` is the `.mp4` and `thumbnailFilename` its cover. Crop/resize/Wanly upload are image-only.
 - **`ImageService` uses only `package:image`** (pure Dart) for decode/resize/encode — no native codecs. This is the reason the app builds for Linux desktop with no extra plugin work. Don't introduce platform-channel image libs.
-- **Output directory is platform-branched** in `ImageService.getOutputDirectory` (Android: `/storage/emulated/0/Download/InstaGrab`, Linux: `$HOME/Pictures/InstaGrab`, else: app documents). The Android manifest declares legacy external storage + `READ_MEDIA_IMAGES` to support this hardcoded path.
+- **Output directory is platform-branched** in `ImageService.getOutputDirectory` (Android: `/storage/emulated/0/Download/InstaGrab`, Linux: `$HOME/Pictures/InstaGrab`, else: app documents). The Android manifest declares legacy external storage + `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` to support this hardcoded path.
 - **`DownloadedImage` is defined in `home_screen.dart`** (not in a model file) and imported by `editor_screen.dart`. `EditorScreen` holds the post-edit bytes in `_croppedBytes`; `null` means "show original". `_updateImageInfo` must be called after any op that changes `_activeBytes` so the width/height fields and `_originalAspect` stay in sync.
 - **The `Crop` widget is rebuilt via a ValueKey** combining index + aspect ratio + cropped-bytes length. Changing any of these without updating that key will silently leave stale crop state.
 
 ## Instagram extraction caveats
 
-Instagram actively rate-limits and sometimes returns empty HTML shells. The layered strategy exists because each one fails independently — do not collapse them. When debugging extraction failures, log the HTTP status and body length from `_fetchAndParse` before adding new parsers; most "no images found" failures are 200s with a login wall rather than parser bugs.
+Instagram actively rate-limits and, for unauthenticated clients, now almost always returns an empty JS shell (~640 KB, no media JSON or og tags) for both the post and embed pages — in practice only the cookie strategy works today. The layered strategy exists because each one fails independently — do not collapse them. When debugging extraction failures, log the HTTP status and body length from `_fetchAndParse` before adding new parsers; most "no images found" failures are 200s with a login wall rather than parser bugs.
 
 The regex in `_extractUrlsFromScriptText` filters URLs >500 chars (Instagram CDN URLs with very long query strings are usually tracking pixels, not the full-resolution image). Adjust with care.
 

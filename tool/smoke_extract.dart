@@ -8,10 +8,14 @@ Future<void> main(List<String> args) async {
     return;
   }
   try {
-    final urls = await InstagramService.extractImageUrls(args.first);
-    print('Found ${urls.length} image(s):');
-    for (var i = 0; i < urls.length; i++) {
-      print('  [$i] ${urls[i]}');
+    final media = await InstagramService.extractMedia(args.first);
+    print('Found ${media.length} item(s):');
+    for (var i = 0; i < media.length; i++) {
+      final m = media[i];
+      final dims = m.width != null ? ' ${m.width}x${m.height}' : '';
+      final dur = m.durationSeconds != null ? ' ${m.durationSeconds}s' : '';
+      print('  [$i] ${m.kind.name}$dims$dur  ${m.url}');
+      if (m.thumbnailUrl != null) print('       cover: ${m.thumbnailUrl}');
     }
   } on InstagramExtractionException catch (e) {
     print('EXTRACTION FAILED: ${e.message}');

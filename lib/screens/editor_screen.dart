@@ -5,16 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:crop_your_image/crop_your_image.dart' hide ImageFormat;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
-import 'package:path/path.dart' as p;
 import '../services/image_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
+import '../services/video_service.dart';
 import 'settings_screen.dart';
 
 /// Editor screen: crop + resize the selected library image.
 ///
-/// Left rail is the full persistent library, newest-first. Center is the
-/// crop/resize editor. Right side is a collapsible metadata pane.
+/// Left rail is the full persistent library, newest-first, videos marked
+/// with a play badge. Center is the crop/resize editor for images, or a
+/// cover-frame preview with a Save video button for videos (which are never
+/// edited or re-encoded). Right side is a collapsible metadata pane.
 /// Save writes to the user's settings-configured path/format with no
 /// prompts — every decision is pre-declared in Settings.
 class EditorScreen extends StatefulWidget {
@@ -85,6 +87,22 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> _selectImage(LibraryImage entry) async {
     if (_selected?.id == entry.id) return;
+    if (entry.isVideo) {
+      // A video's only pixels are its cover frame, kept for display. Crop
+      // and resize never see it, so the dimension fields are left alone.
+      final thumb = LibraryService.thumbnailFileFor(entry);
+      final bytes = thumb != null && await thumb.exists()
+          ? await thumb.readAsBytes()
+          : null;
+      if (!mounted) return;
+      setState(() {
+        _selected = entry;
+        _originalBytes = bytes;
+        _editedBytes = null;
+        _cropActive = false;
+      });
+      return;
+    }
     final bytes = await LibraryService.readBytes(entry);
     if (!mounted) return;
     final decoded = img.decodeImage(bytes);
@@ -233,6 +251,49 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  /// Copies the selected video verbatim into the save path. Re-saving just
+  /// overwrites the same `<shortcode>_<i>.mp4`, so it is safe to repeat
+  /// (e.g. after changing the save path in Settings).
+  Future<void> _saveVideo() async {
+    final entry = _selected;
+    if (entry == null || !entry.isVideo) return;
+    setState(() => _isSaving = true);
+    try {
+      final source = LibraryService.fileFor(entry);
+      if (!await source.exists()) {
+        throw Exception('the library copy is missing — grab the post again');
+      }
+      final settings = await SettingsService.load();
+      final path = await VideoService.saveVideo(
+        source,
+        filename: entry.filename,
+        directory: settings.savePath,
+      );
+      _toast('Saved → $path', duration: const Duration(seconds: 3));
+    } catch (e) {
+      _toast('Save failed: $e');
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  /// Hands the video to the desktop's default player. Linux only — it is a
+  /// plain `xdg-open`, not a plugin, so there is nothing to build per
+  /// platform.
+  Future<void> _openInPlayer() async {
+    final entry = _selected;
+    if (entry == null) return;
+    try {
+      await Process.start(
+        'xdg-open',
+        [LibraryService.fileFor(entry).path],
+        mode: ProcessStartMode.detached,
+      );
+    } catch (e) {
+      _toast('Could not open a video player: $e');
+    }
+  }
+
   Future<void> _openSettings() async {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const SettingsScreen()),
@@ -310,8 +371,10 @@ class _EditorScreenState extends State<EditorScreen> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.save),
-            tooltip: 'Save',
-            onPressed: _isSaving || _selected == null ? null : _save,
+            tooltip: _selected?.isVideo == true ? 'Save video' : 'Save',
+            onPressed: _isSaving || _selected == null
+                ? null
+                : (_selected!.isVideo ? _saveVideo : _save),
           ),
         ],
       ),
@@ -329,7 +392,9 @@ class _EditorScreenState extends State<EditorScreen> {
                 Expanded(
                   child: _selected == null
                       ? const _EmptyEditorHint()
-                      : _buildEditor(),
+                      : _selected!.isVideo
+                          ? _buildVideoView()
+                          : _buildEditor(),
                 ),
                 if (_infoVisible && _selected != null)
                   _InfoPane(
@@ -339,6 +404,95 @@ class _EditorScreenState extends State<EditorScreen> {
                   ),
               ],
             ),
+    );
+  }
+
+  /// Video pane: cover frame with a play badge, the facts we know, and Save
+  /// video. Crop and resize are image-only and are not offered here.
+  Widget _buildVideoView() {
+    final theme = Theme.of(context);
+    final entry = _selected!;
+    final facts = [
+      if (entry.width > 0 && entry.height > 0)
+        '${entry.width} × ${entry.height}',
+      if (entry.durationSeconds != null)
+        VideoService.formatDuration(entry.durationSeconds!),
+      _humanBytes(entry.fileSize),
+    ].join('  ·  ');
+    return Column(
+      children: [
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: _originalBytes != null
+                      ? Image.memory(_originalBytes!, fit: BoxFit.contain)
+                      : Container(
+                          color: theme.colorScheme.surfaceContainerHighest,
+                          child: Icon(
+                            Icons.movie_outlined,
+                            size: 64,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                ),
+                const _PlayBadge(size: 72),
+              ],
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                facts,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Videos are saved exactly as downloaded. Crop and resize '
+                'are for images only.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _isSaving ? null : _saveVideo,
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_alt),
+                label: Text(_isSaving ? 'Saving...' : 'Save video'),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 48),
+                ),
+              ),
+              if (Platform.isLinux) ...[
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _openInPlayer,
+                  icon: const Icon(Icons.play_circle_outline),
+                  label: const Text('Open in video player'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 44),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -603,6 +757,12 @@ class _EditorScreenState extends State<EditorScreen> {
 
 enum _EditorMode { crop, resize }
 
+String _humanBytes(int n) {
+  if (n < 1024) return '$n B';
+  if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+  return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
 /// Vertical scrollable thumbnail strip on the left edge. Newest-first.
 class _LibraryRail extends StatelessWidget {
   final List<LibraryImage> library;
@@ -653,17 +813,15 @@ class _LibraryRail extends StatelessWidget {
                             ),
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(6),
-                              child: active && selectedBytes != null
-                                  ? Image.memory(
-                                      selectedBytes!,
-                                      fit: BoxFit.cover,
-                                      gaplessPlayback: true,
-                                    )
-                                  : Image.file(
-                                      File(_pathFor(entry)),
-                                      fit: BoxFit.cover,
-                                      gaplessPlayback: true,
-                                    ),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                alignment: Alignment.center,
+                                children: [
+                                  _thumbnail(context, entry, active),
+                                  if (entry.isVideo)
+                                    const Center(child: _PlayBadge(size: 28)),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -676,15 +834,48 @@ class _LibraryRail extends StatelessWidget {
     );
   }
 
-  String _pathFor(LibraryImage entry) {
-    final home = Platform.environment['HOME'] ?? '/tmp';
-    return p.join(
-      home,
-      '.local',
-      'share',
-      'InstaGrab',
-      'library',
-      entry.filename,
+  Widget _thumbnail(BuildContext context, LibraryImage entry, bool active) {
+    if (active && selectedBytes != null) {
+      return Image.memory(
+        selectedBytes!,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+      );
+    }
+    final file = LibraryService.thumbnailFileFor(entry);
+    if (file == null) {
+      // A video whose cover could not be fetched.
+      return ColoredBox(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      );
+    }
+    return Image.file(
+      file,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => ColoredBox(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      ),
+    );
+  }
+}
+
+/// Round translucent play symbol drawn over video thumbnails. Purely a
+/// marker — there is no in-app player.
+class _PlayBadge extends StatelessWidget {
+  final double size;
+  const _PlayBadge({required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: const BoxDecoration(
+        color: Colors.black54,
+        shape: BoxShape.circle,
+      ),
+      child: Icon(Icons.play_arrow, color: Colors.white, size: size * 0.7),
     );
   }
 }
@@ -729,6 +920,8 @@ class _InfoPaneState extends State<_InfoPane> {
   }
 
   Future<void> _loadFolders() async {
+    // Wanly's endpoints are /images/...; videos aren't offered for upload.
+    if (widget.entry.isVideo) return;
     final settings = await SettingsService.load();
     if (settings.wanlyApiUrl.isEmpty) return;
     setState(() {
@@ -872,8 +1065,64 @@ class _InfoPaneState extends State<_InfoPane> {
     );
   }
 
+  Widget _buildVideoInfo(BuildContext context) {
+    final theme = Theme.of(context);
+    final e = widget.entry;
+    return Container(
+      width: 260,
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: theme.dividerColor)),
+      ),
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Video info', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 12),
+          _row(
+            context,
+            'Dimensions',
+            e.width > 0 && e.height > 0
+                ? '${e.width} × ${e.height}'
+                : 'Unknown',
+          ),
+          _row(
+            context,
+            'Duration',
+            e.durationSeconds != null
+                ? VideoService.formatDuration(e.durationSeconds!)
+                : 'Unknown',
+          ),
+          _row(context, 'Size on disk', _humanBytes(e.fileSize)),
+          _row(context, 'File', e.filename),
+          _row(context, 'Shortcode', e.shortcode),
+          _row(context, 'Carousel index', '${e.carouselIndex}'),
+          _row(context, 'Grabbed', _formatDate(e.grabbedAt)),
+          const SizedBox(height: 12),
+          Text('Source', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          SelectableText(
+            e.sourceUrl,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          const Divider(height: 32),
+          Text('Wanly', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text(
+            'Upload to Wanly is for images only.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (widget.entry.isVideo) return _buildVideoInfo(context);
     final theme = Theme.of(context);
     final decoded = _bytes != null ? img.decodeImage(_bytes!) : null;
     final curW = decoded?.width ?? widget.entry.width;
@@ -951,12 +1200,6 @@ class _InfoPaneState extends State<_InfoPane> {
         ],
       ),
     );
-  }
-
-  String _humanBytes(int n) {
-    if (n < 1024) return '$n B';
-    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
-    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   String _formatDate(DateTime d) {
