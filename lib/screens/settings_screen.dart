@@ -134,20 +134,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text('Default format', style: theme.textTheme.titleMedium),
                 const SizedBox(height: 4),
                 Text(
-                  'Every save uses this format — no format picker on save.',
+                  'Every image save uses this format — no format picker on save. '
+                  'Videos are always saved as the original .mp4.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 12),
-                for (final f in ImageFormat.values)
-                  RadioListTile<ImageFormat>(
-                    title: Text(f.label),
-                    subtitle: Text('.${f.extension}'),
-                    value: f,
-                    groupValue: current.format,
-                    onChanged: (v) => v == null ? null : _setFormat(v),
+                RadioGroup<ImageFormat>(
+                  groupValue: current.format,
+                  onChanged: (v) => v == null ? null : _setFormat(v),
+                  child: Column(
+                    children: [
+                      for (final f in ImageFormat.values)
+                        RadioListTile<ImageFormat>(
+                          title: Text(f.label),
+                          subtitle: Text('.${f.extension}'),
+                          value: f,
+                        ),
+                    ],
                   ),
+                ),
                 const SizedBox(height: 32),
                 Text('Wanly API', style: theme.textTheme.titleMedium),
                 const SizedBox(height: 4),

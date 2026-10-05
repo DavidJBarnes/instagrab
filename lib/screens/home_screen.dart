@@ -1,8 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../models/media_item.dart';
 import '../services/instagram_service.dart';
 import '../services/image_service.dart';
 import '../services/library_service.dart';
+import '../services/settings_service.dart';
+import '../services/video_service.dart';
 import 'editor_screen.dart';
 import 'settings_screen.dart';
 
@@ -55,48 +59,91 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _loading = true;
       _error = null;
-      _status = 'Extracting image URLs...';
+      _status = 'Finding media...';
     });
 
     try {
-      final imageUrls = await InstagramService.extractImageUrls(input);
-      if (imageUrls.isEmpty) {
+      final media = await InstagramService.extractMedia(input);
+      if (media.isEmpty) {
         setState(() {
           _loading = false;
-          _error = 'No images found in this post';
+          _error = 'No images or videos found in this post';
         });
         return;
       }
 
+      final settings = await SettingsService.load();
       final added = <LibraryImage>[];
-      for (var i = 0; i < imageUrls.length; i++) {
+      var exported = 0;
+      for (var i = 0; i < media.length; i++) {
+        final item = media[i];
+        final label = item.isVideo ? 'video' : 'image';
         setState(() {
-          _status = 'Downloading image (${i + 1}/${imageUrls.length})...';
+          _status = 'Downloading $label (${i + 1}/${media.length})...';
         });
         try {
-          final bytes = await ImageService.downloadImage(imageUrls[i]);
-          final entry = await LibraryService.add(
-            bytes: bytes,
-            sourceUrl: canonical,
-            shortcode: shortcode,
-            carouselIndex: i,
-          );
+          final LibraryImage entry;
+          if (item.isVideo) {
+            entry =
+                await _grabVideo(item, canonical, shortcode, i, media.length);
+          } else {
+            final bytes = await ImageService.downloadImage(item.url);
+            entry = await LibraryService.add(
+              bytes: bytes,
+              sourceUrl: canonical,
+              shortcode: shortcode,
+              carouselIndex: i,
+            );
+          }
           added.add(entry);
+
+          // Also drop the untouched original into the user's save path, so a
+          // grab alone produces files where they expect them. Written
+          // verbatim (no decode/re-encode) to keep the CDN original intact —
+          // the export format setting applies to editor image exports only.
+          try {
+            if (entry.isVideo) {
+              await VideoService.saveVideo(
+                LibraryService.fileFor(entry),
+                filename: entry.filename,
+                directory: settings.savePath,
+              );
+            } else {
+              final bytes = await LibraryService.readBytes(entry);
+              final ext = ImageService.extensionForBytes(bytes);
+              await ImageService.saveImage(
+                bytes,
+                filename: '${shortcode}_$i.$ext',
+                directory: settings.savePath,
+              );
+            }
+            exported++;
+          } catch (e) {
+            // A read-only or missing save path must not lose the grab —
+            // the library copy above is already safe on disk.
+            debugPrint('Failed to export $label ${i + 1} to save path: $e');
+          }
         } catch (e) {
           // Skip failures on individual carousel frames
-          debugPrint('Failed to grab image ${i + 1}: $e');
+          debugPrint('Failed to grab $label ${i + 1}: $e');
         }
       }
 
       if (added.isEmpty) {
         setState(() {
           _loading = false;
-          _error = 'Failed to download any images from this post';
+          _error = 'Failed to download any media from this post';
         });
         return;
       }
 
-      setState(() => _loading = false);
+      setState(() {
+        _loading = false;
+        _error = exported == 0
+            ? 'Grabbed ${added.length} item(s) to the library, but could not '
+                'write to ${settings.savePath} — check the save path in Settings.'
+            : null;
+      });
 
       if (mounted) {
         await Navigator.of(context).push(
@@ -116,6 +163,57 @@ class _HomeScreenState extends State<HomeScreen> {
         _error = 'Unexpected error: $e';
       });
     }
+  }
+
+  /// Streams one video into the library (with its cover frame, when there
+  /// is one) and registers it, reporting progress in the button label.
+  Future<LibraryImage> _grabVideo(
+    MediaItem item,
+    String canonical,
+    String shortcode,
+    int index,
+    int count,
+  ) async {
+    final dest = await LibraryService.videoFileFor(shortcode, index);
+    var lastPercent = -1;
+    await VideoService.downloadVideo(
+      item.url,
+      dest,
+      onProgress: (received, total) {
+        if (!mounted) return;
+        final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+        final percent =
+            total == null || total == 0 ? null : received * 100 ~/ total;
+        // Repaint on whole-percent steps, not on every network chunk.
+        if (percent != null && percent == lastPercent) return;
+        lastPercent = percent ?? lastPercent;
+        setState(() {
+          _status = 'Downloading video (${index + 1}/$count) '
+              '${percent != null ? '$percent%' : '$mb MB'}...';
+        });
+      },
+    );
+
+    // The cover is only for display; a video without one is still a grab.
+    Uint8List? thumb;
+    final thumbUrl = item.thumbnailUrl;
+    if (thumbUrl != null) {
+      try {
+        thumb = await ImageService.downloadImage(thumbUrl);
+      } catch (e) {
+        debugPrint('Failed to fetch cover for video ${index + 1}: $e');
+      }
+    }
+
+    return LibraryService.addVideo(
+      sourceUrl: canonical,
+      shortcode: shortcode,
+      carouselIndex: index,
+      thumbnailBytes: thumb,
+      width: item.width,
+      height: item.height,
+      durationSeconds: item.durationSeconds,
+    );
   }
 
   Future<void> _openLibrary() async {
@@ -162,7 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Grab Instagram Images',
+                  'Grab Instagram Media',
                   style: theme.textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),
@@ -170,7 +268,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Paste an Instagram share URL to add it to your library, '
+                  'Paste an Instagram post or reel URL to add its images and '
+                  'videos to your library, '
                   'or open the library to re-edit past grabs.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
@@ -211,7 +310,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         )
                       : const Icon(Icons.download),
                   label: Text(
-                    _loading ? (_status ?? 'Processing...') : 'Grab Images',
+                    _loading ? (_status ?? 'Processing...') : 'Grab',
                   ),
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 16),

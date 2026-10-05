@@ -19,8 +19,7 @@ class ImageService {
       final response = await http.get(
         Uri.parse(url),
         headers: {
-          'User-Agent':
-              'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 '
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
           'Accept': 'image/*,*/*;q=0.8',
           'Referer': 'https://www.instagram.com/',
@@ -160,8 +159,49 @@ class ImageService {
     return file.path;
   }
 
+  /// Returns the file extension matching the actual bytes of an image.
+  ///
+  /// Sniffs magic bytes rather than trusting a URL or a caller-supplied
+  /// name, so grabbed originals can be written to disk verbatim (no
+  /// re-encode) under a name that matches their real format. Falls back
+  /// to `jpg`, which is what the Instagram CDN serves in practice.
+  static String extensionForBytes(Uint8List bytes) {
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xFF &&
+        bytes[1] == 0xD8 &&
+        bytes[2] == 0xFF) {
+      return 'jpg';
+    }
+    if (bytes.length >= 8 &&
+        bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      return 'png';
+    }
+    if (bytes.length >= 12 &&
+        bytes[0] == 0x52 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46 &&
+        bytes[3] == 0x46 &&
+        bytes[8] == 0x57 &&
+        bytes[9] == 0x45 &&
+        bytes[10] == 0x42 &&
+        bytes[11] == 0x50) {
+      return 'webp';
+    }
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x47 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46) {
+      return 'gif';
+    }
+    return 'jpg';
+  }
+
   /// Generates a timestamped filename for saving.
-  static String generateFilename({String prefix = 'insta', String ext = 'png'}) {
+  static String generateFilename(
+      {String prefix = 'insta', String ext = 'png'}) {
     final now = DateTime.now();
     final stamp = '${now.year}${_pad(now.month)}${_pad(now.day)}'
         '_${_pad(now.hour)}${_pad(now.minute)}${_pad(now.second)}';

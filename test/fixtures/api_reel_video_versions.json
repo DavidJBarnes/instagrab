@@ -1,0 +1,56 @@
+{
+  "items": [
+    {
+      "code": "Cx1y2Z3aBcD",
+      "media_type": 2,
+      "has_audio": true,
+      "video_duration": 32.533,
+      "original_width": 1080,
+      "original_height": 1920,
+      "image_versions2": {
+        "candidates": [
+          {
+            "width": 640,
+            "height": 1137,
+            "url": "https://scontent-lax3-1.cdninstagram.com/v/t51.29350-15/cover_640.jpg?stp=dst-jpg_e35_p640x1137&_nc_ht=scontent&oh=00_y"
+          },
+          {
+            "width": 1080,
+            "height": 1920,
+            "url": "https://scontent-lax3-1.cdninstagram.com/v/t51.29350-15/cover_1080.jpg?stp=dst-jpg_e35_p1080x1920&_nc_ht=scontent&oh=00_y"
+          }
+        ]
+      },
+      "video_versions": [
+        {
+          "type": 101,
+          "width": 480,
+          "height": 854,
+          "url": "https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/reel_480.mp4?efg=abc&_nc_ht=scontent&oh=00_x&oe=6700"
+        },
+        {
+          "type": 101,
+          "width": 720,
+          "height": 1280,
+          "bandwidth": 1500000,
+          "url": "https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/reel_720_low.mp4?efg=abc&_nc_ht=scontent&oh=00_x&oe=6700"
+        },
+        {
+          "type": 103,
+          "width": 720,
+          "height": 1280,
+          "bandwidth": 2600000,
+          "url": "https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/reel_720_high.mp4?efg=abc&_nc_ht=scontent&oh=00_x&oe=6700"
+        },
+        {
+          "type": 102,
+          "width": 640,
+          "height": 1138,
+          "url": "https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/reel_640.mp4?efg=abc&_nc_ht=scontent&oh=00_x&oe=6700"
+        }
+      ]
+    }
+  ],
+  "num_results": 1,
+  "status": "ok"
+}
