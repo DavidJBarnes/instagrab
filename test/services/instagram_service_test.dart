@@ -11,11 +11,16 @@ void main() {
       );
     });
 
-    test('accepts reel and tv URLs, and a missing www', () {
+    test('accepts reel, reels and tv URLs, and a missing www', () {
       expect(
         InstagramService.normalizeUrl(
             'https://instagram.com/reel/Cx1y2Z3aBcD/'),
         'https://www.instagram.com/p/Cx1y2Z3aBcD/',
+      );
+      expect(
+        InstagramService.normalizeUrl(
+            'https://www.instagram.com/reels/DdJqVKrCrvc/'),
+        'https://www.instagram.com/p/DdJqVKrCrvc/',
       );
       expect(
         InstagramService.normalizeUrl(
