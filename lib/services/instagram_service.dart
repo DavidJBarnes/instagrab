@@ -32,7 +32,7 @@ class InstagramService {
 
   /// Extracts the shortcode from any IG share URL and returns the
   /// canonical `https://www.instagram.com/p/<shortcode>/` form, or null
-  /// if the input isn't an IG post/reel/TV URL.
+  /// if the input isn't an IG post/reel(s)/TV URL.
   ///
   /// Shortcodes are exactly 11 characters. Share links often append a
   /// token built from the same alphabet (`/p/<shortcode><token>`), so the
@@ -40,7 +40,7 @@ class InstagramService {
   /// decodes to a media id that Instagram rejects with a 400.
   static String? normalizeUrl(String input) {
     final match = RegExp(
-      r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]{11})',
+      r'https?://(?:www\.)?instagram\.com/(?:p|reels?|tv)/([A-Za-z0-9_-]{11})',
     ).firstMatch(input.trim());
     if (match == null) return null;
     return 'https://www.instagram.com/p/${match.group(1)}/';
