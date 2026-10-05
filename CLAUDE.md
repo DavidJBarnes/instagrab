@@ -23,7 +23,7 @@ flutter pub get                 # fetch deps
 flutter run -d linux            # desktop run (dev)
 flutter run -d android          # device/emulator run
 flutter analyze                 # lint (uses analysis_options.yaml)
-flutter test                    # no tests currently exist, but this is the entrypoint
+flutter test                    # unit tests in test/ (split-frames tests need ffmpeg)
 dart format lib/                # format
 ```
 
@@ -46,6 +46,7 @@ HomeScreen (URL input)
         ├─ image: Crop mode (crop_your_image) / Resize mode (image pkg copyResize)
         │     └─► ImageService.saveImage → save path
         └─ video: cover-frame preview + Save video (VideoService.saveVideo, a file copy)
+                  + Split frames (VideoService.splitFrames → system ffmpeg)
 ```
 
 Key invariants to preserve when editing:
@@ -53,6 +54,8 @@ Key invariants to preserve when editing:
 - **`InstagramService` is 100% static** (no instance state) and pure-Dart. All strategies live in this one file and run sequentially — short-circuit on first non-empty result. When adding a strategy, chain it onto `extractMedia` in the same "return if non-empty, otherwise continue" pattern and throw `InstagramExtractionException` only after all strategies fail (the logged-in strategy's error is the one surfaced). The parsers `mediaFromApiItem` / `mediaFromHtml` are public and tested against `test/fixtures/`.
 - **Extraction returns `MediaItem`s** (`lib/models/media_item.dart`): image or video, with a cover `thumbnailUrl`, dimensions and duration for videos. For videos the highest-resolution entry of `video_versions` wins — those are progressive mp4s with audio muxed in; never use the DASH manifest or `bytestart=` segment URLs.
 - **Videos are never decoded or re-encoded.** `VideoService` streams them to `<name>.part`, checks the `ftyp` header, renames, and exports by file copy. No native video plugins — the editor shows the cover frame, and on Linux "Open in video player" just runs `xdg-open`.
+- **The one exception is "Split frames"** (video info pane): `VideoService.splitFrames` shells out to the system `ffmpeg` to write every 4th frame as a lossless PNG into `<save path>/<shortcode>_<i>_frames/`, named by source frame number (`_f000004.png`). It is a subprocess, not a plugin; a missing ffmpeg surfaces as `FrameSplitException`.
+- **"Clear library"** (editor AppBar, confirmed) is `LibraryService.clear()`: deletes every file in the library dir, index included. Exports are untouched.
 - **Library entries carry a `kind`** (`LibraryImage.kind`); index entries written before video support have none and load as images. A video entry's `filename` is the `.mp4` and `thumbnailFilename` its cover. Crop/resize/Wanly upload are image-only.
 - **`ImageService` uses only `package:image`** (pure Dart) for decode/resize/encode — no native codecs. This is the reason the app builds for Linux desktop with no extra plugin work. Don't introduce platform-channel image libs.
 - **Output directory is platform-branched** in `ImageService.getOutputDirectory` (Android: `/storage/emulated/0/Download/InstaGrab`, Linux: `$HOME/Pictures/InstaGrab`, else: app documents). The Android manifest declares legacy external storage + `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` to support this hardcoded path.

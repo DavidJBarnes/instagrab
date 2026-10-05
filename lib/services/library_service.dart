@@ -296,6 +296,20 @@ class LibraryService {
     await _writeIndex(items);
   }
 
+  /// Empties the library: every file in the library directory (media,
+  /// covers, the index, and any leftover `.part` downloads) is deleted.
+  /// Exports in the save path are not touched. Returns how many entries
+  /// the index held.
+  static Future<int> clear() async {
+    final count = (await list()).length;
+    if (await _libraryDir.exists()) {
+      await for (final f in _libraryDir.list()) {
+        if (f is File) await f.delete();
+      }
+    }
+    return count;
+  }
+
   static Future<void> _deleteFiles(
     LibraryImage entry, {
     Set<String?> keep = const {},

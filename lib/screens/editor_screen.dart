@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:crop_your_image/crop_your_image.dart' hide ImageFormat;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
 import '../services/image_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
@@ -328,6 +329,52 @@ class _EditorScreenState extends State<EditorScreen> {
     await _loadLibrary();
   }
 
+  Future<void> _clearLibrary() async {
+    final videos = _library.where((e) => e.isVideo).length;
+    final images = _library.length - videos;
+    String plural(int n, String word) => '$n $word${n == 1 ? '' : 's'}';
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear the whole library?'),
+        content: Text(
+          'This permanently deletes ${plural(images, 'image')} and '
+          '${plural(videos, 'video')} from the InstaGrab library. Your '
+          'saved exports are not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Clear library'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      await LibraryService.clear();
+    } catch (e) {
+      _toast('Clear failed: $e', duration: const Duration(seconds: 3));
+    }
+    if (!mounted) return;
+    setState(() {
+      _selected = null;
+      _originalBytes = null;
+      _editedBytes = null;
+      _cropActive = false;
+    });
+    await _loadLibrary();
+    _toast('Library cleared');
+  }
+
   void _toast(String msg, {Duration duration = const Duration(seconds: 1)}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -357,6 +404,12 @@ class _EditorScreenState extends State<EditorScreen> {
               icon: const Icon(Icons.delete_outline),
               tooltip: 'Remove from library',
               onPressed: _deleteSelected,
+            ),
+          if (_library.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.delete_sweep_outlined),
+              tooltip: 'Clear library',
+              onPressed: _isSaving ? null : _clearLibrary,
             ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -902,6 +955,10 @@ class _InfoPaneState extends State<_InfoPane> {
   bool _loadingFolders = false;
   String? _folderError;
   bool _uploading = false;
+  bool _splitting = false;
+
+  /// Folder the last split of this entry wrote to, for "Open folder".
+  String? _framesDir;
 
   Uint8List? get _bytes => widget.currentBytes;
 
@@ -915,6 +972,7 @@ class _InfoPaneState extends State<_InfoPane> {
   void didUpdateWidget(covariant _InfoPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.entry.id != widget.entry.id) {
+      _framesDir = null;
       _loadFolders();
     }
   }
@@ -1065,6 +1123,54 @@ class _InfoPaneState extends State<_InfoPane> {
     );
   }
 
+  /// Writes every 4th frame of the selected video as PNGs into
+  /// `<save path>/<shortcode>_<i>_frames/`. Re-running overwrites the same
+  /// files.
+  Future<void> _splitFrames() async {
+    final entry = widget.entry;
+    setState(() => _splitting = true);
+    try {
+      final source = LibraryService.fileFor(entry);
+      if (!await source.exists()) {
+        throw Exception('the library copy is missing — grab the post again');
+      }
+      final settings = await SettingsService.load();
+      final outDir = Directory(p.join(
+        settings.savePath,
+        '${p.basenameWithoutExtension(entry.filename)}_frames',
+      ));
+      final frames = await VideoService.splitFrames(source, outDir);
+      if (!mounted) return;
+      setState(() => _framesDir = outDir.path);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${frames.length} frames → ${outDir.path}'),
+          duration: const Duration(seconds: 4),
+          action: Platform.isLinux
+              ? SnackBarAction(
+                  label: 'Open folder',
+                  onPressed: () => _openFolder(outDir.path),
+                )
+              : null,
+        ),
+      );
+    } on FrameSplitException catch (e) {
+      if (mounted) _showError('Split failed: ${e.message}');
+    } catch (e) {
+      if (mounted) _showError('Split failed: $e');
+    } finally {
+      if (mounted) setState(() => _splitting = false);
+    }
+  }
+
+  Future<void> _openFolder(String path) async {
+    try {
+      await Process.start('xdg-open', [path], mode: ProcessStartMode.detached);
+    } catch (e) {
+      if (mounted) _showError('Could not open folder: $e');
+    }
+  }
+
   Widget _buildVideoInfo(BuildContext context) {
     final theme = Theme.of(context);
     final e = widget.entry;
@@ -1106,6 +1212,34 @@ class _InfoPaneState extends State<_InfoPane> {
               color: theme.colorScheme.primary,
             ),
           ),
+          const Divider(height: 32),
+          Text('Frames', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text(
+            'Every 4th frame as a lossless PNG, into a folder in your save '
+            'path.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: _splitting ? null : _splitFrames,
+            icon: _splitting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.burst_mode_outlined),
+            label: Text(_splitting ? 'Splitting...' : 'Split frames'),
+          ),
+          if (_framesDir != null && Platform.isLinux)
+            TextButton.icon(
+              onPressed: () => _openFolder(_framesDir!),
+              icon: const Icon(Icons.folder_open_outlined, size: 18),
+              label: const Text('Open frames folder'),
+            ),
           const Divider(height: 32),
           Text('Wanly', style: theme.textTheme.titleSmall),
           const SizedBox(height: 4),

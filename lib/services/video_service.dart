@@ -108,6 +108,82 @@ class VideoService {
     return target;
   }
 
+  /// Extracts every [every]th frame of [video] (frames 0, every, 2*every,
+  /// ...) as lossless PNGs into [outDir], named `<stem>_f<NNNNNN>.png` by
+  /// their frame number in the source. Returns the written files in order.
+  ///
+  /// This is the one place a video is decoded, and it is done by the system
+  /// `ffmpeg` binary rather than a plugin — the app still ships no native
+  /// video code. Throws [FrameSplitException] if ffmpeg is missing or fails.
+  static Future<List<File>> splitFrames(
+    File video,
+    Directory outDir, {
+    int every = 4,
+  }) async {
+    if (every < 1) throw ArgumentError.value(every, 'every', 'must be >= 1');
+    await outDir.create(recursive: true);
+    final stem = p.basenameWithoutExtension(video.path);
+    // ffmpeg numbers its outputs 0, 1, 2...; they are renamed afterwards to
+    // the source frame number so a frame can be traced back to the video.
+    final tmpPattern = p.join(outDir.path, '.split_%06d.png');
+    final ProcessResult result;
+    try {
+      result = await Process.run('ffmpeg', splitFramesArgs(
+        video.path,
+        tmpPattern,
+        every: every,
+      ));
+    } on ProcessException {
+      throw const FrameSplitException(
+        'ffmpeg is not installed (sudo dnf install ffmpeg)',
+      );
+    }
+
+    final tmp = <File>[];
+    for (var i = 0;; i++) {
+      final f = File(p.join(outDir.path, '.split_${_pad(i)}.png'));
+      if (!await f.exists()) break;
+      tmp.add(f);
+    }
+    if (result.exitCode != 0 || tmp.isEmpty) {
+      for (final f in tmp) {
+        await f.delete();
+      }
+      final err = (result.stderr as String).trim();
+      throw FrameSplitException(
+        err.isEmpty ? 'ffmpeg exited with code ${result.exitCode}' : err,
+      );
+    }
+
+    final out = <File>[];
+    for (var i = 0; i < tmp.length; i++) {
+      final name = '${stem}_f${_pad(i * every)}.png';
+      out.add(await tmp[i].rename(p.join(outDir.path, name)));
+    }
+    return out;
+  }
+
+  /// ffmpeg arguments for [splitFrames]: keep frames whose index is a
+  /// multiple of [every], pass their timestamps through untouched (no
+  /// duplicated or dropped frames), and write RGB PNGs.
+  static List<String> splitFramesArgs(
+    String input,
+    String outputPattern, {
+    required int every,
+  }) =>
+      [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-y',
+        '-i', input,
+        '-vf', 'select=not(mod(n\\,$every))',
+        '-fps_mode', 'passthrough',
+        '-start_number', '0',
+        outputPattern,
+      ];
+
+  static String _pad(int n) => n.toString().padLeft(6, '0');
+
   /// Filename for frame [index] of the post [shortcode]: `<shortcode>_<i>.mp4`,
   /// matching the `<shortcode>_<i>.<ext>` names grabbed images get, so one
   /// post's files sort together. Characters that are unsafe in filenames are
@@ -135,4 +211,12 @@ class VideoDownloadException implements Exception {
   const VideoDownloadException(this.message);
   @override
   String toString() => 'VideoDownloadException: $message';
+}
+
+/// Exception thrown when extracting frames from a video fails.
+class FrameSplitException implements Exception {
+  final String message;
+  const FrameSplitException(this.message);
+  @override
+  String toString() => 'FrameSplitException: $message';
 }
