@@ -6,12 +6,13 @@ import '../services/instagram_service.dart';
 import '../services/image_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
+import '../services/tiktok_service.dart';
 import '../services/video_service.dart';
 import 'editor_screen.dart';
 import 'settings_screen.dart';
 
-/// Home screen: paste an Instagram URL, download into the library, or
-/// open the library directly to re-edit previously grabbed images.
+/// Home screen: paste an Instagram or TikTok URL, download into the library,
+/// or open the library directly to re-edit previously grabbed images.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -46,15 +47,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _processUrl() async {
     final input = _urlController.text.trim();
     if (input.isEmpty) {
-      setState(() => _error = 'Please enter an Instagram URL');
+      setState(() => _error = 'Please enter an Instagram or TikTok URL');
       return;
     }
-    final canonical = InstagramService.normalizeUrl(input);
-    if (canonical == null) {
-      setState(() => _error = 'Not a valid Instagram post URL');
+    final isTikTok = TikTokService.isTikTokUrl(input);
+    final igCanonical = isTikTok ? null : InstagramService.normalizeUrl(input);
+    if (!isTikTok && igCanonical == null) {
+      setState(() => _error = 'Not a valid Instagram or TikTok post URL');
       return;
     }
-    final shortcode = RegExp(r'/p/([^/]+)/').firstMatch(canonical)!.group(1)!;
 
     setState(() {
       _loading = true;
@@ -63,7 +64,21 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final media = await InstagramService.extractMedia(input);
+      // Each source yields the post's canonical URL, the key its files are
+      // named by in the library and save path, and its media.
+      final String canonical;
+      final String shortcode;
+      final List<MediaItem> media;
+      if (isTikTok) {
+        final post = await TikTokService.extractMedia(input);
+        canonical = post.canonicalUrl;
+        shortcode = TikTokService.libraryKey(post.videoId);
+        media = post.media;
+      } else {
+        canonical = igCanonical!;
+        shortcode = RegExp(r'/p/([^/]+)/').firstMatch(canonical)!.group(1)!;
+        media = await InstagramService.extractMedia(input);
+      }
       if (media.isEmpty) {
         setState(() {
           _loading = false;
@@ -87,7 +102,10 @@ class _HomeScreenState extends State<HomeScreen> {
             entry =
                 await _grabVideo(item, canonical, shortcode, i, media.length);
           } else {
-            final bytes = await ImageService.downloadImage(item.url);
+            final bytes = await ImageService.downloadImage(
+              item.url,
+              headers: item.headers,
+            );
             entry = await LibraryService.add(
               bytes: bytes,
               sourceUrl: canonical,
@@ -157,6 +175,11 @@ class _HomeScreenState extends State<HomeScreen> {
         _loading = false;
         _error = e.message;
       });
+    } on TikTokExtractionException catch (e) {
+      setState(() {
+        _loading = false;
+        _error = e.message;
+      });
     } catch (e) {
       setState(() {
         _loading = false;
@@ -179,6 +202,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await VideoService.downloadVideo(
       item.url,
       dest,
+      headers: item.headers,
       onProgress: (received, total) {
         if (!mounted) return;
         final mb = (received / (1024 * 1024)).toStringAsFixed(1);
@@ -260,7 +284,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Grab Instagram Media',
+                  'Grab Instagram & TikTok Media',
                   style: theme.textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),
@@ -268,8 +292,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Paste an Instagram post or reel URL to add its images and '
-                  'videos to your library, '
+                  'Paste an Instagram post or reel URL, or a TikTok video or '
+                  'photo post URL, to add its images and videos to your '
+                  'library, '
                   'or open the library to re-edit past grabs.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
@@ -283,7 +308,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   enabled: !_loading,
                   decoration: InputDecoration(
                     hintText: 'https://www.instagram.com/p/...',
-                    labelText: 'Instagram URL',
+                    labelText: 'Instagram or TikTok URL',
                     prefixIcon: const Icon(Icons.link),
                     suffixIcon: IconButton(
                       icon: const Icon(Icons.paste),

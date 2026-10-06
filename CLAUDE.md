@@ -39,6 +39,8 @@ HomeScreen (URL input)
         ├─ Strategy 1: logged-in /api/v1/media/<id>/info/ (browser cookies) → image_versions2 / video_versions
         ├─ Strategy 2: public post page → embedded JSON, then og:video/og:image, then .mp4 CDN URLs
         └─ Strategy 3: public {url}embed/captioned/ → parsed the same way
+  └─► (tiktok.com URL) TikTokService.extractMedia(url) → TikTokPost      ← lib/services/tiktok_service.dart
+        └─ public post page → __UNIVERSAL_DATA_FOR_REHYDRATION__ (or SIGI_STATE) JSON → imagePost photos, else bitrateInfo video
   └─► per item: ImageService.downloadImage → LibraryService.add          (images)
                 VideoService.downloadVideo (streamed) → LibraryService.addVideo  (videos)
       and a verbatim copy of each original into the save path
@@ -67,6 +69,10 @@ Key invariants to preserve when editing:
 Instagram actively rate-limits and, for unauthenticated clients, now almost always returns an empty JS shell (~640 KB, no media JSON or og tags) for both the post and embed pages — in practice only the cookie strategy works today. The layered strategy exists because each one fails independently — do not collapse them. When debugging extraction failures, log the HTTP status and body length from `_fetchAndParse` before adding new parsers; most "no images found" failures are 200s with a login wall rather than parser bugs.
 
 The regex in `_extractUrlsFromScriptText` filters URLs >500 chars (Instagram CDN URLs with very long query strings are usually tracking pixels, not the full-resolution image). Adjust with care.
+
+## TikTok
+
+`TikTokService` is static and pure Dart, like `InstagramService`, and needs no login: the public video page embeds the post JSON. The clean files in `video.bitrateInfo` (any H.264 file beats any H.265 one, since stock Fedora VLC/ffmpeg can't decode HEVC; then highest resolution) return 403 unless the request carries the `tt_chain_token` cookie that the page fetch set, plus a `tiktok.com` Referer. Those headers travel on `MediaItem.headers` into `VideoService.downloadVideo`. Never use `downloadAddr`, which is the watermarked copy. Library entries use `tt_<videoId>` as their `shortcode`. Short links (`vm.tiktok.com`, `/t/`) are resolved by following the redirect. Photo (slideshow) posts (`/photo/<id>`) are fetched via `/@user/video/<id>` (`fetchUrlFor`) because the `/photo/` page has no post data. They yield one image per `imagePost.images[]`, preferring a JPEG/PNG/WebP URL over HEIC; their background music is not fetched.
 
 ## Share intent (Android)
 

@@ -1,7 +1,8 @@
-/// Whether a piece of Instagram media is a still image or a video.
+/// Whether a piece of grabbed media is a still image or a video.
 enum MediaKind { image, video }
 
-/// One downloadable piece of media extracted from an Instagram post.
+/// One downloadable piece of media extracted from an Instagram or TikTok
+/// post.
 ///
 /// A single-image post yields one image item, a reel or video post yields
 /// one video item, and a carousel yields one item per frame in post order —
@@ -24,6 +25,10 @@ class MediaItem {
   /// Length in seconds for videos, when the source reports it.
   final double? durationSeconds;
 
+  /// Extra HTTP headers the CDN requires to serve [url], or null. TikTok's
+  /// CDN refuses requests without the page's session cookie and a Referer.
+  final Map<String, String>? headers;
+
   const MediaItem({
     required this.kind,
     required this.url,
@@ -31,12 +36,14 @@ class MediaItem {
     this.width,
     this.height,
     this.durationSeconds,
+    this.headers,
   });
 
   const MediaItem.image(
     this.url, {
     this.width,
     this.height,
+    this.headers,
   })  : kind = MediaKind.image,
         thumbnailUrl = null,
         durationSeconds = null;
@@ -47,6 +54,7 @@ class MediaItem {
     this.width,
     this.height,
     this.durationSeconds,
+    this.headers,
   }) : kind = MediaKind.video;
 
   bool get isVideo => kind == MediaKind.video;

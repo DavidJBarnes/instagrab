@@ -12,9 +12,12 @@ import 'package:path/path.dart' as p;
 class ImageService {
   /// Downloads an image from a URL and returns the raw bytes.
   ///
-  /// Uses appropriate headers to avoid being blocked by CDNs.
-  /// Throws [ImageDownloadException] on failure.
-  static Future<Uint8List> downloadImage(String url) async {
+  /// Uses appropriate headers to avoid being blocked by CDNs; [headers] are
+  /// added to (and override) them. Throws [ImageDownloadException] on failure.
+  static Future<Uint8List> downloadImage(
+    String url, {
+    Map<String, String>? headers,
+  }) async {
     try {
       final response = await http.get(
         Uri.parse(url),
@@ -23,6 +26,7 @@ class ImageService {
               '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
           'Accept': 'image/*,*/*;q=0.8',
           'Referer': 'https://www.instagram.com/',
+          ...?headers,
         },
       ).timeout(const Duration(seconds: 30));
 

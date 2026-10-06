@@ -15,7 +15,8 @@ class VideoService {
 
   /// Streams the video at [url] to [dest] and returns the number of bytes
   /// written. [onProgress] is called as chunks arrive; `total` is null when
-  /// the server sends no Content-Length.
+  /// the server sends no Content-Length. [headers] are added to (and
+  /// override) the defaults — e.g. the cookie and Referer TikTok's CDN needs.
   ///
   /// Writes to `<dest>.part` and renames on success, so a failed or
   /// interrupted download never leaves a truncated file under the real name.
@@ -23,6 +24,7 @@ class VideoService {
   static Future<int> downloadVideo(
     String url,
     File dest, {
+    Map<String, String>? headers,
     void Function(int received, int? total)? onProgress,
   }) async {
     final part = File('${dest.path}.part');
@@ -33,6 +35,7 @@ class VideoService {
           'User-Agent': _userAgent,
           'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
           'Referer': 'https://www.instagram.com/',
+          ...?headers,
         });
       final response =
           await client.send(request).timeout(const Duration(seconds: 30));
@@ -128,11 +131,13 @@ class VideoService {
     final tmpPattern = p.join(outDir.path, '.split_%06d.png');
     final ProcessResult result;
     try {
-      result = await Process.run('ffmpeg', splitFramesArgs(
-        video.path,
-        tmpPattern,
-        every: every,
-      ));
+      result = await Process.run(
+          'ffmpeg',
+          splitFramesArgs(
+            video.path,
+            tmpPattern,
+            every: every,
+          ));
     } on ProcessException {
       throw const FrameSplitException(
         'ffmpeg is not installed (sudo dnf install ffmpeg)',
@@ -173,12 +178,17 @@ class VideoService {
   }) =>
       [
         '-hide_banner',
-        '-loglevel', 'error',
+        '-loglevel',
+        'error',
         '-y',
-        '-i', input,
-        '-vf', 'select=not(mod(n\\,$every))',
-        '-fps_mode', 'passthrough',
-        '-start_number', '0',
+        '-i',
+        input,
+        '-vf',
+        'select=not(mod(n\\,$every))',
+        '-fps_mode',
+        'passthrough',
+        '-start_number',
+        '0',
         outputPattern,
       ];
 
